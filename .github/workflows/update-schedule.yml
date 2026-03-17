@@ -13,51 +13,78 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install pytz
+        run: pip install pytz
+
       - name: Fetch calendar and write schedule.json
         run: |
           python3 << 'EOF'
-          import urllib.request, re, json
-          from datetime import datetime, timedelta, timezone
+          import urllib.request, re, json, pytz
+          from datetime import datetime, timedelta
 
           ICAL_URL = "https://calendar.google.com/calendar/ical/97457878b7aa6ff2c06ec9f1aa1e9651fca7fbf607f8d1dbcfc20c9ca40d081d%40group.calendar.google.com/public/basic.ics"
+          VIENNA = pytz.timezone("Europe/Vienna")
 
           req = urllib.request.Request(ICAL_URL, headers={"User-Agent": "Mozilla/5.0"})
           with urllib.request.urlopen(req, timeout=15) as r:
               text = r.read().decode("utf-8")
 
-          def parse_dt(s):
-              if not s:
+          def parse_dt(raw):
+              if not raw:
                   return None
-              clean = s.split(":")[-1].strip()
-              m = re.match(r"(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})", clean)
+              if ":" in raw:
+                  tzid = raw.split(":")[0].split("=")[-1] if "TZID" in raw else None
+                  clean = raw.split(":")[-1].strip()
+              else:
+                  tzid = None
+                  clean = raw.strip()
+              m = re.match(r"(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z?)", clean)
               if not m:
                   return None
-              return datetime(int(m[1]),int(m[2]),int(m[3]),int(m[4]),int(m[5]),int(m[6]))
+              dt = datetime(int(m[1]),int(m[2]),int(m[3]),int(m[4]),int(m[5]),int(m[6]))
+              if m[7] == "Z":
+                  dt = pytz.utc.localize(dt).astimezone(VIENNA)
+              elif tzid:
+                  try:
+                      tz = pytz.timezone(tzid)
+                      dt = tz.localize(dt).astimezone(VIENNA)
+                  except Exception:
+                      dt = VIENNA.localize(dt)
+              else:
+                  dt = VIENNA.localize(dt)
+              return dt
 
-          events = []
-          now = datetime.utcnow()
+          now = datetime.now(VIENNA)
           week_ahead = now + timedelta(days=7)
+          events = []
 
           for block in text.split("BEGIN:VEVENT")[1:]:
               def get(key):
-                  m = re.search(rf"{key}[^:]*:([^\r\n]+)", block)
+                  m = re.search(rf"{key}[^:;\r\n]*(?:;[^:]*)?:([^\r\n]+)", block)
                   return m.group(1).strip() if m else ""
-              start = parse_dt(get("DTSTART"))
-              end   = parse_dt(get("DTEND")) or start
+              def get_with_params(key):
+                  m = re.search(rf"({key}[^\r\n]*):([^\r\n]+)", block)
+                  return m.group(0).strip() if m else ""
+
+              start = parse_dt(get_with_params("DTSTART"))
+              end   = parse_dt(get_with_params("DTEND")) or start
               name  = get("SUMMARY").replace("\\,", ",").replace("\\n", " ")
               desc  = get("DESCRIPTION").replace("\\,", ",").replace("\\n", " ")
+
               if start and end >= now and start <= week_ahead:
                   events.append({
-                      "start": start.isoformat(),
-                      "end":   end.isoformat(),
+                      "start": start.strftime("%Y-%m-%dT%H:%M:%S"),
+                      "end":   end.strftime("%Y-%m-%dT%H:%M:%S"),
                       "name":  name,
                       "host":  desc
                   })
 
           events.sort(key=lambda e: e["start"])
           with open("schedule.json", "w") as f:
-              json.dump(events, f)
+              json.dump(events, f, ensure_ascii=False)
           print(f"Wrote {len(events)} events to schedule.json")
+          for e in events:
+              print(e["start"], e["name"])
           EOF
 
       - name: Commit schedule.json
